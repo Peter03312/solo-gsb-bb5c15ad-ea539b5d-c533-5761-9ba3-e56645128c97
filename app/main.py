@@ -12,7 +12,15 @@ from fastapi.responses import JSONResponse
 
 from .audit import AuditValidationError, audit
 from .fit import fit
-from .schemas import AuditRequest, AuditResponse, FitRequest, FitResponse
+from .gap import gap
+from .schemas import (
+    AuditRequest,
+    AuditResponse,
+    FitRequest,
+    FitResponse,
+    GapRequest,
+    GapResponse,
+)
 
 app = FastAPI(
     title="年代约束审计 API",
@@ -22,8 +30,10 @@ app = FastAPI(
         "并在可行时返回古老到年轻的字典序最小合法顺序。"
         "/fit 另接收每层一项偏好（参考年代 + 权重），在相同约束下选取"
         "整数年代，最小化 max(weight × |age − target_ma|)。"
+        "/gap 另收两个查询编号 a_id、b_id，求 age(a_id) − age(b_id) "
+        "在全体合法赋值下的最小值、最大值及各自的边界年代映射。"
     ),
-    version="1.1.0",
+    version="1.2.0",
 )
 
 
@@ -78,3 +88,24 @@ def fit_endpoint(payload: FitRequest) -> dict:
       多解时取按编号升序排列的年代向量中字典序最小者。
     """
     return fit(payload.model_dump())
+
+
+@app.post(
+    "/gap",
+    response_model=GapResponse,
+    summary="两层年代差的极值与边界见证",
+    tags=["gap"],
+)
+def gap_endpoint(payload: GapRequest) -> dict:
+    """在与 /audit 相同的约束下求 ``age(a_id) − age(b_id)`` 的最小/最大值。
+
+    返回三种结果之一（由 ``status`` 字段区分）：
+
+    * ``cycle`` / ``conflict``：原约束无解，结果与 /audit 相同；
+    * ``gap``：附 ``min_gap``、``max_gap``，以及分别达到两个边界的
+      全体地层年代映射 ``min_gap_ages``、``max_gap_ages``（任意合法见证）。
+
+    同层查询（``a_id == b_id``）两个极值均为 0；互不连通的地层同样支持；
+    查询编号未提交返回 422。
+    """
+    return gap(payload.model_dump())

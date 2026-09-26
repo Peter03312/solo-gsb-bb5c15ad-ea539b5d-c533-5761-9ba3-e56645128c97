@@ -20,11 +20,17 @@ age(older_id) >= age(younger_id) + 1
 - **POST /audit** —— 约束审计：检测关系环、双向传播收紧可行年代区间，
   可行时返回古老 → 年轻方向上编号字典序最小的合法顺序；
 - **POST /fit** —— 偏好拟合：另接收每层一项偏好（参考年代 + 权重），
-  在相同约束下选取整数年代，最小化 `max(weight × |age − target_ma|)`。
+  在相同约束下选取整数年代，最小化 `max(weight × |age − target_ma|)`；
+- **POST /gap** —— 年代差极值：另收两个查询编号 `a_id`、`b_id`，在全体
+  合法赋值上求 `age(a_id) − age(b_id)` 的最小值、最大值，并各返回一个
+  达到边界的全体地层年代映射。
 
 无数据库、无外部服务，单容器即可运行。
 
 ## 一条命令启动
+
+前置条件：已安装 Docker（含 Compose 插件，`docker compose version` 可用），
+无需自行准备 Python 环境。
 
 ```bash
 docker compose up --build
@@ -32,7 +38,8 @@ docker compose up --build
 
 依赖安装、单元测试与服务初始化都在这一命令内完成：构建镜像时安装
 `requirements.txt` 并运行全部单元测试（失败即中止构建），随后启动
-uvicorn 并通过 `/health` 健康检查。
+uvicorn 并通过 `/health` 健康检查。服务在前台运行，`Ctrl+C` 停止；
+后台运行可用 `docker compose up --build -d`，`docker compose down` 拆除。
 
 启动后 API 位于本机 **http://localhost:8000** ：
 
@@ -40,10 +47,13 @@ uvicorn 并通过 `/health` 健康检查。
 | --- | --- |
 | http://localhost:8000/audit | 约束审计接口（POST） |
 | http://localhost:8000/fit | 偏好拟合接口（POST） |
+| http://localhost:8000/gap | 年代差极值接口（POST） |
 | http://localhost:8000/docs | Swagger 交互文档 |
 | http://localhost:8000/health | 健康检查 |
 
 ## 配置项
+
+应用本身无需任何配置（无数据库、无外部密钥）；唯一可调的是宿主机映射端口。
 
 | 配置 | 位置 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -171,6 +181,85 @@ curl -s -X POST http://localhost:8000/fit \
 }
 ```
 
+## POST /gap：年代差极值与边界见证
+
+在 /audit 相同的约束（整数年代区间 + `age(older) >= age(younger) + 1`）
+下，给定两个已提交编号 `a_id`、`b_id`，在**全体合法整数赋值**上求
+
+```
+gap = age(a_id) − age(b_id)
+```
+
+的最小值 `min_gap` 与最大值 `max_gap`，并分别返回一个达到该边界的
+**全体地层年代映射** `min_gap_ages`、`max_gap_ages`（任意合法见证即可）。
+
+请求与限制：
+
+- 请求体沿用 /audit 的 `strata`、`relations`，另加 `a_id`、`b_id` 两个
+  查询编号；查询编号未提交（或为空）返回 **HTTP 422**；
+- 规模与数值上限（越界返回 **HTTP 422**）：最多 **200 层**、
+  **1000 条关系**；区间端点绝对值 ≤ **10^12**；
+- **同层查询**（`a_id == b_id`）两个极值都为 **0**；
+- **互不连通的地层**同样支持：没有关系链时极值由各自区间决定；
+- 原约束无解时与 /audit 相同，返回 `cycle` / `conflict`。
+
+### 算法（不逐年代枚举，也不直接相减独立区间端点）
+
+这是一个差分约束系统。先用 /audit 的 DAG 双向传播得到每层收紧后的可行
+区间 `[L, U]`；再令 `d(x, y)` 为关系图上 `x → y` 的最长路（边权 1，
+不可达忽略），即关系链强制的 `age(y) − age(x) ≥ d(x,y)`，则
+
+```
+min_gap = max( L[a] − U[b],  d(a,b)  )     # a→b 不可达时只取前者
+max_gap = min( U[a] − L[b], −d(b,a) )      # b→a 不可达时只取前者
+```
+
+单层区间端点之差只覆盖区间这一类约束；关系链的强制差必须同时参与取极
+（例如存在 `b → a` 关系时，`max_gap` 被钉为负数）。边界见证通过把源点
+固定在其传播下界、其余层取上界后沿拓扑正向传播得到，为 `O(层数 +
+关系数)`，200 层 / 1000 关系为毫秒级。
+
+### 请求示例
+
+```bash
+curl -s -X POST http://localhost:8000/gap \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "strata": [
+      {"id": "A", "youngest_ma": 0, "oldest_ma": 10},
+      {"id": "B", "youngest_ma": 0, "oldest_ma": 10},
+      {"id": "C", "youngest_ma": 0, "oldest_ma": 10}
+    ],
+    "relations": [
+      {"older_id": "A", "younger_id": "B"},
+      {"older_id": "B", "younger_id": "C"}
+    ],
+    "a_id": "A",
+    "b_id": "C"
+  }'
+```
+
+响应（关系链强制 `age(A) − age(C) ≥ 2`，故 `min_gap = 2`；两个映射都是
+满足全部约束、且恰取对应极值的全体年代赋值）：
+
+```json
+{
+  "status": "gap",
+  "a_id": "A",
+  "b_id": "C",
+  "min_gap": 2,
+  "max_gap": 10,
+  "min_gap_ages": {"A": 2, "B": 1, "C": 0},
+  "max_gap_ages": {"A": 10, "B": 9, "C": 0}
+}
+```
+
+查询编号未提交时返回 **HTTP 422**：
+
+```json
+{"detail": ["查询编号 a_id 引用了未提交的地层编号：'X'"]}
+```
+
 ## 本地开发（不使用 Docker）
 
 ```bash
@@ -183,13 +272,15 @@ python -m unittest discover -s tests    # 运行测试
 
 ```
 app/
-  audit.py     # 校验、成环检测、上下界传播、字典序最小拓扑序（/audit 与 /fit 共用）
+  audit.py     # 校验、成环检测、上下界传播、字典序最小拓扑序（三个求解接口共用）
   fit.py       # 偏好拟合：阈值二分 + 字典序最小最优年代选取
-  schemas.py   # Pydantic 请求/响应模型（含 /fit 的规模与数值上限）
-  main.py      # FastAPI 路由（/audit、/fit、/health）
+  gap.py       # 年代差极值：差分约束（DAG 最长路）+ 边界见证构造
+  schemas.py   # Pydantic 请求/响应模型（含规模与数值上限）
+  main.py      # FastAPI 路由（/audit、/fit、/gap、/health）
 tests/
   test_audit.py  # /audit 核心逻辑
   test_fit.py    # /fit 核心逻辑（含暴力枚举交叉验证）
+  test_gap.py    # /gap 核心逻辑（含暴力枚举交叉验证）
   test_api.py    # HTTP 接口层（需 fastapi/httpx，镜像构建期运行）
 Dockerfile
 docker-compose.yml

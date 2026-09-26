@@ -171,6 +171,164 @@ class FitEndpointTests(unittest.TestCase):
 
 
 @unittest.skipIf(TestClient is None, "未安装 fastapi/httpx，跳过接口测试")
+class GapEndpointTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    def _post_gap(self, payload: dict):
+        return self.client.post("/gap", json=payload)
+
+    def test_gap_result(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [{"older_id": "a", "younger_id": "b"}],
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "gap")
+        self.assertEqual(body["a_id"], "a")
+        self.assertEqual(body["b_id"], "b")
+        self.assertEqual(body["min_gap"], 1)
+        self.assertEqual(body["max_gap"], 10)
+        self.assertEqual(
+            body["min_gap_ages"]["a"] - body["min_gap_ages"]["b"],
+            body["min_gap"],
+        )
+        self.assertEqual(
+            body["max_gap_ages"]["a"] - body["max_gap_ages"]["b"],
+            body["max_gap"],
+        )
+
+    def test_gap_same_id_is_zero(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [{"older_id": "a", "younger_id": "b"}],
+                "a_id": "b",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "gap")
+        self.assertEqual(body["min_gap"], 0)
+        self.assertEqual(body["max_gap"], 0)
+
+    def test_gap_disconnected(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 5), _s("b", 20, 25)],
+                "relations": [],
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "gap")
+        self.assertEqual(body["min_gap"], -25)
+        self.assertEqual(body["max_gap"], -15)
+
+    def test_gap_cycle_passthrough(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"},
+                    {"older_id": "b", "younger_id": "a"},
+                ],
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "cycle")
+
+    def test_gap_conflict_passthrough(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 5, 5), _s("b", 5, 5)],
+                "relations": [{"older_id": "a", "younger_id": "b"}],
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "conflict")
+
+    def test_unknown_query_id_returns_422(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [],
+                "a_id": "ghost",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("未提交", str(resp.json()["detail"]))
+
+    def test_gap_too_many_strata_returns_422(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s(f"s{i}", 0, 10) for i in range(201)],
+                "relations": [],
+                "a_id": "s0",
+                "b_id": "s1",
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_gap_too_many_relations_returns_422(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [{"older_id": "a", "younger_id": "b"}] * 1001,
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_gap_endpoint_out_of_range_returns_422(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10**12 + 1), _s("b", 0, 10)],
+                "relations": [],
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", -(10**12) - 1, 0), _s("b", 0, 10)],
+                "relations": [],
+                "a_id": "a",
+                "b_id": "b",
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_gap_extra_field_returns_422(self):
+        resp = self._post_gap(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [],
+                "a_id": "a",
+                "b_id": "b",
+                "extra": 1,
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+
+@unittest.skipIf(TestClient is None, "未安装 fastapi/httpx，跳过接口测试")
 class AuditCompatibilityTests(unittest.TestCase):
     """确认 /audit 行为保持不变。"""
 
