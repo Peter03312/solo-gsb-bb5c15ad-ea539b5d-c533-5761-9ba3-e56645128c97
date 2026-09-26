@@ -1,0 +1,20 @@
+services:
+  age-audit:
+    build: .
+    image: age-audit-api:latest
+    container_name: age-audit-api
+    # 依赖安装、单元测试与服务初始化均在 `docker compose up --build`
+    # 一键完成：构建镜像时安装依赖并跑通测试，随后启动 uvicorn。
+    # 宿主机端口通过 HOST_PORT 配置（默认 8000）；容器内固定 8000。
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      # 供容器内健康检查等使用；应用始终监听容器 8000 端口。
+      PORT: "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
