@@ -20,7 +20,10 @@ age(older_id) >= age(younger_id) + 1
 - **POST /audit** —— 约束审计：检测关系环、双向传播收紧可行年代区间，
   可行时返回古老 → 年轻方向上编号字典序最小的合法顺序；
 - **POST /fit** —— 偏好拟合：另接收每层一项偏好（参考年代 + 权重），
-  在相同约束下选取整数年代，最小化 `max(weight × |age − target_ma|)`。
+  在相同约束下选取整数年代，最小化 `max(weight × |age − target_ma|)`；
+- **POST /gap** —— 年代差边界：另接收两个查询编号 `a_id`、`b_id`，在
+  全部合法整数赋值上求 `age(a_id) − age(b_id)` 的最小值、最大值，并分别
+  返回达到边界的全体地层年代映射。
 
 无数据库、无外部服务，单容器即可运行。
 
@@ -40,6 +43,7 @@ uvicorn 并通过 `/health` 健康检查。
 | --- | --- |
 | http://localhost:8000/audit | 约束审计接口（POST） |
 | http://localhost:8000/fit | 偏好拟合接口（POST） |
+| http://localhost:8000/gap | 年代差边界接口（POST） |
 | http://localhost:8000/docs | Swagger 交互文档 |
 | http://localhost:8000/health | 健康检查 |
 
@@ -171,6 +175,94 @@ curl -s -X POST http://localhost:8000/fit \
 }
 ```
 
+## POST /gap：两地层年代差的最小/最大值
+
+在 /audit 相同的约束（整数年代区间 + `age(older) >= age(younger) + 1`）
+下，另接收两个**查询编号** `a_id`、`b_id`，计算全部合法整数赋值中
+
+```
+min(age(a_id) − age(b_id))      max(age(a_id) − age(b_id))
+```
+
+并分别返回**达到该边界的全体地层年代映射** `min_witness`、
+`max_witness`（任一合法见证即可，覆盖提交的每一层）。
+
+约定：
+
+- **同层查询**（`a_id == b_id`）时最小值、最大值都为 **0**，见证仍为
+  一个全体可行赋值；
+- **互不连通的地层**（不在同一条关系链路上）同样支持：两组件可自由
+  组合，边界由各自收紧后的可行区间决定（无关系时可为负）；
+- 查询编号未提交返回 **HTTP 422**；
+- 原约束无解时沿用 /audit 的 `cycle` / `conflict` 响应；
+- 规模与数值上限与 /fit 相同（越界返回 **HTTP 422**）：最多 **200 层**、
+  **1000 条关系**；区间端点绝对值 ≤ **10^12**。
+
+求解**不逐年代枚举**，也**不**直接相减各层独立可行区间的端点——后者在
+两层经由关系链间接约束时会给出错误答案（例如三层链
+`A -> B -> C` 均为 `[0,100]`，`age(A) − age(B)` 最大只有 **99** 而非
+100，因为 `B >= C + 1 >= 1`）。服务把约束改写成标准差分约束系统
+`age(v) − age(u) <= w`（关系边权 −1，并用一个恒取 0 的超级源点承载
+区间上下界），则：
+
+```
+min(age(a) − age(b)) = −dist(a, b)
+max(age(a) − age(b)) =  dist(b, a)
+```
+
+两次 Bellman-Ford 最短路（O(V·E)，V ≤ 201）即可同时得到边界与见证：
+以源点的最短路位势 `age(v) = dist(s, v) − dist(s, 0)` 赋值，所有约束
+取紧且目标差值恰好等于边界。
+
+### 请求示例
+
+```bash
+curl -s -X POST http://localhost:8000/gap \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "strata": [
+      {"id": "A", "youngest_ma": 0, "oldest_ma": 100},
+      {"id": "B", "youngest_ma": 0, "oldest_ma": 100},
+      {"id": "C", "youngest_ma": 0, "oldest_ma": 100}
+    ],
+    "relations": [
+      {"older_id": "A", "younger_id": "B"},
+      {"older_id": "B", "younger_id": "C"}
+    ],
+    "a_id": "A",
+    "b_id": "B"
+  }'
+```
+
+响应（最小差恒为关系要求的 1；最大差为 99 而非独立区间端点相减的
+100）：
+
+```json
+{
+  "status": "gap",
+  "a_id": "A",
+  "b_id": "B",
+  "min_gap": 1,
+  "max_gap": 99,
+  "min_witness": {"A": 2, "B": 1, "C": 0},
+  "max_witness": {"A": 100, "B": 1, "C": 0}
+}
+```
+
+互不连通示例（两层、无关系，均为 `[0, 10]`，查询 `A − B`）：
+
+```json
+{
+  "status": "gap",
+  "a_id": "A",
+  "b_id": "B",
+  "min_gap": -10,
+  "max_gap": 10,
+  "min_witness": {"A": 0, "B": 10},
+  "max_witness": {"A": 10, "B": 0}
+}
+```
+
 ## 本地开发（不使用 Docker）
 
 ```bash
@@ -183,13 +275,15 @@ python -m unittest discover -s tests    # 运行测试
 
 ```
 app/
-  audit.py     # 校验、成环检测、上下界传播、字典序最小拓扑序（/audit 与 /fit 共用）
+  audit.py     # 校验、成环检测、上下界传播、字典序最小拓扑序（三个接口共用）
   fit.py       # 偏好拟合：阈值二分 + 字典序最小最优年代选取
-  schemas.py   # Pydantic 请求/响应模型（含 /fit 的规模与数值上限）
-  main.py      # FastAPI 路由（/audit、/fit、/health）
+  gap.py       # 年代差边界：差分约束系统 + Bellman-Ford 最短路与边界见证
+  schemas.py   # Pydantic 请求/响应模型（含规模与数值上限）
+  main.py      # FastAPI 路由（/audit、/fit、/gap、/health）
 tests/
   test_audit.py  # /audit 核心逻辑
   test_fit.py    # /fit 核心逻辑（含暴力枚举交叉验证）
+  test_gap.py    # /gap 核心逻辑（含暴力枚举交叉验证）
   test_api.py    # HTTP 接口层（需 fastapi/httpx，镜像构建期运行）
 Dockerfile
 docker-compose.yml

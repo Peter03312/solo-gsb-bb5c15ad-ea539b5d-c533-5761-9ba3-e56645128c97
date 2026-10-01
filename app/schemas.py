@@ -170,3 +170,59 @@ FitResponse = Annotated[
     Union[CycleResponse, ConflictResponse, OptimalResponse],
     Field(discriminator="status"),
 ]
+
+
+# ---- POST /gap：两点年代差边界 -------------------------------------------
+
+#: /gap 的规模与数值上限与 /fit 相同（≤ 200 层、≤ 1000 关系、|端点| ≤ 10^12）。
+class GapStratum(FitStratum):
+    """/gap 的地层：与 /fit 相同，区间端点绝对值不得超过 10^12。"""
+
+
+class GapRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strata: list[GapStratum] = Field(
+        ..., min_length=1, max_length=MAX_STRATA, description="提交的地层列表"
+    )
+    relations: list[OlderRelation] = Field(
+        default_factory=list,
+        max_length=MAX_RELATIONS,
+        description="“甲比乙古老”的观测关系列表",
+    )
+    a_id: str = Field(..., min_length=1, description="查询年代差的地层编号（被减数）")
+    b_id: str = Field(..., min_length=1, description="查询年代差的地层编号（减数）")
+
+
+class GapResultResponse(BaseModel):
+    status: Literal["gap"]
+    a_id: str
+    b_id: str
+    min_gap: int = Field(
+        ...,
+        description=(
+            "全部合法整数赋值中 age(a_id) − age(b_id) 的最小值；"
+            "同层查询或两层互不连通时为 0"
+        ),
+    )
+    max_gap: int = Field(
+        ...,
+        description=(
+            "全部合法整数赋值中 age(a_id) − age(b_id) 的最大值；"
+            "同层查询或两层互不连通时为 0"
+        ),
+    )
+    min_witness: dict[str, int] = Field(
+        ...,
+        description="达到 min_gap 的全体地层年代映射（任一合法见证）",
+    )
+    max_witness: dict[str, int] = Field(
+        ...,
+        description="达到 max_gap 的全体地层年代映射（任一合法见证）",
+    )
+
+
+GapResponse = Annotated[
+    Union[CycleResponse, ConflictResponse, GapResultResponse],
+    Field(discriminator="status"),
+]
